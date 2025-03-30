@@ -12,131 +12,46 @@ namespace smaug
 {
     struct resource;
     struct resource_handle;
-
     struct resource_load_promise;
-    struct resource_unload_promise;
 
-    using sync_load_resource_callback = resource*(*)(const std::string& resource_name);
+    const std::string&      get_resource_name(const resource_load_promise& promise);
 
-    bool is_resource_ready(const resource_handle& handle);
-    bool is_handle_valid(const resource_handle& handle);
-    resource_handle empty_handle();
+    resource_handle         empty_handle();
+    bool                    is_resource_ready(const resource_handle& handle);
+    bool                    is_handle_empty(const resource_handle& handle);
+    const std::string&      get_resource_name(const resource_handle& handle);
 
-    template<class resource_subclass>
-    const resource_subclass* dynamic_resource_cast(const resource_handle& handle);
+    resource_handle         get_resource(const std::string& name);
+    const resource*         use_resource(const resource_handle& handle);
 
-    template<class resource_subclass>
-    const resource_subclass* static_resource_cast(const resource_handle& handle); 
+    bool                    resource_load_promise_empty(const resource_load_promise& promise);
+    resource_load_promise   take_resource_load_job();
+    resource_handle         submit_resource_load_job(resource_load_promise promise, resource* resource);
 
-    resource_handle get_resource(const std::string& name);
-    resource_handle register_resource(const std::string& name, resource* resource, bool automanaged);
+    resource*               take_resource_unload_job();
 
-    bool is_loading_job_available();
-    resource_load_promise* take_resource_loading_job();
-    void commit_resource_loading_job(resource_load_promise* promise);
+    resource_handle         register_resource(const std::string& name, resource* resource);
 
-    bool is_unloading_job_available();
-    resource_unload_promise* take_resource_unloading_job();
-    void commit_resource_unloading_job(resource_unload_promise* promise);
-
-    void mark_all_resources_for_unload();
+    void                    move_all_resources_to_unload();
 }
 
-struct smaug_internal;
-
-/*
-    Resource
-*/
+bool operator==(const smaug::resource_handle& lhs, const smaug::resource_handle& rhs) noexcept;
+bool operator!=(const smaug::resource_handle& lhs, const smaug::resource_handle& rhs) noexcept;
 
 struct smaug::resource
 {
-    virtual ~resource() = 0;
-};
-
-#ifdef SMAUG_IMPLEMENTATION
-    smaug::resource::~resource(){};
-#endif
-
-/*
-    Resource Handles
-*/
-
-struct smaug::resource_handle
-{
-private:
-    friend bool smaug::is_resource_ready(const resource_handle& handle);
-    friend bool smaug::is_handle_valid(const resource_handle& handle);
-    friend resource_handle smaug::empty_handle();
-
-    template<class resource_subclass>
-    friend const resource_subclass* smaug::dynamic_resource_cast(const resource_handle& handle);
-
-    template<class resource_subclass>
-    friend const resource_subclass* smaug::static_resource_cast(const resource_handle& handle);
-
-    friend smaug::resource_handle smaug::register_resource(const std::string& name, resource* resource, bool automanaged);
-    friend smaug::resource_handle smaug::get_resource(const std::string& name);
-    
-    friend smaug::resource_load_promise* smaug::take_resource_loading_job();
-    friend void smaug::commit_resource_loading_job(resource_load_promise* promise);
-    
-    friend smaug::resource_unload_promise* smaug::take_resource_unloading_job();
-    friend void smaug::commit_resource_unloading_job(resource_unload_promise* promise);
-
-    friend void smaug::mark_all_resources_for_unload();
-
-    friend smaug::resource_load_promise;
-    friend smaug::resource_unload_promise;
-
-    friend ::smaug_internal;
-
-    resource_handle(        
-        const std::string&  resource_uid,
-        resource*           resource,
-        uint8_t             state,          //implicitly of type resource_state
-        bool                automanaged
-    );
-
-    struct resource_metadata;
-    resource_metadata* meta;
-
 public:
-    resource_handle(const resource_handle& other);
-    ~resource_handle();
-
-    void operator=(const resource_handle& other) noexcept;
-    bool operator==(const resource_handle& other) const noexcept;
-    bool operator!=(const resource_handle& other) const noexcept;
+    virtual ~resource() {};
 };
-
-/*
-    Promises
-*/
 
 struct smaug::resource_load_promise
 {
-    const std::string* resource_name;
-
-    resource* loaded_resource = nullptr;
-    bool success = false;
-
-    friend resource_load_promise* smaug::take_resource_loading_job();
-
+friend bool smaug::resource_load_promise_empty(const resource_load_promise& promise);
+friend smaug::resource_load_promise smaug::take_resource_load_job();
+friend smaug::resource_handle       smaug::submit_resource_load_job(resource_load_promise promise, resource* resource);
 private:
-    resource_load_promise(resource_handle handle);
-};
-
-struct smaug::resource_unload_promise
-{
-    const std::string* resource_name;
-    resource* const resource_to_unload = nullptr;
-
-    bool success = false;
-
-    friend resource_unload_promise* smaug::take_resource_unloading_job();
-
-private:
-    resource_unload_promise(resource_handle handle);
+    //implicitly resource_meta; not to expose the class to client
+    void* meta;
 };
 
 /*
@@ -146,419 +61,266 @@ private:
 #ifdef SMAUG_IMPLEMENTATION
 
 #include <atomic>
-#include <mutex>
-#include <shared_mutex>
-#include <unordered_map>
-#include <stdexcept>
-#include <queue>
-#include <list>
-#include <thread>
 
 /*
-    Forwards
+    Resources State
 */
 
-static std::shared_mutex resource_registry_mutex;
-static std::unordered_map<std::string, smaug::resource_handle> resource_registry;
-
-static std::mutex load_queue_mutex;
-static std::queue<smaug::resource_handle> load_queue;
-
-static std::mutex unload_queue_mutex;
-static std::list<smaug::resource_handle> unload_queue;
-
-struct smaug_internal
+enum class resource_state
 {
-    static smaug::resource_handle safe_create_handle(const std::string& resource_name, bool automanaged);
-    static smaug::resource_handle safe_get_handle(const std::string& resource_name);
-
-    static void queue_load  (const smaug::resource_handle& handle);
-    static void queue_unload(const smaug::resource_handle& handle);
+    pending_load,
+    loaded,
+    pending_unload,
+    unloaded
 };
 
-/*
-    Resource Handle
-*/
-
-enum class resource_state : uint8_t
+struct resource_meta
 {
-    loaded          = 0,
-    unloaded        = 1,
-
-    pending_load    = 2,
-    pending_unload  = 4,
-
-    during_load     = 8,
-    during_unload   = 16,
-
-    invalid         = 32
+    const std::string*      name;
+    resource_state          state;
+    std::atomic<uint32_t>   handles;
+    smaug::resource*        resource;
 };
 
-struct smaug::resource_handle::resource_metadata
+void move_to_unload(resource_meta* meta);
+
+struct smaug::resource_handle
 {
-    //constants
-    const std::string           resource_uid;
-    const bool                  automanaged;
+    resource_meta* meta;
 
-    //auto managed do not touch
-    std::atomic<uint64_t>       references;
+    ~resource_handle() {
+        meta->handles--;
+        if (meta->handles == 0)
+            move_to_unload(meta);
+        meta = nullptr;
+    }
 
-    //can be changed
-    resource*                   handled_resource;
-    resource_state              state;
+    resource_handle(std::nullptr_t) {
+        meta = nullptr;
+    }
 
-    resource_metadata(
-        const std::string&      _uid, 
-        const bool              _automanged) : 
-        resource_uid(_uid), 
-        automanaged(_automanged)
-        {};
+    resource_handle(resource_meta* _meta) : meta(_meta) {
+        meta->handles++;
+    }
+
+    resource_handle(const resource_handle& other)
+    {
+        meta = other.meta;
+        if (meta) meta->handles++;
+    }
+
+    resource_handle& operator=(const resource_handle& other)
+    {
+        meta = other.meta;
+        if (meta) meta->handles++;
+        return *this;
+    }
 };
 
-smaug::resource_handle::resource_handle(        
-    const std::string&  resource_uid,
-    resource*           resource,
-    uint8_t             state,
-    bool                automanaged
-)
+smaug::resource_handle smaug::empty_handle()
 {
-    meta = new resource_metadata{resource_uid, automanaged};
-    
-    meta->references = 1;
-    meta->handled_resource = resource;
-    meta->state = reinterpret_cast<resource_state&>(state);
-}
-
-smaug::resource_handle::resource_handle(const resource_handle& other) :
-    meta(other.meta)
-{
-    if (meta != nullptr)
-        meta->references++;
-}
-
-smaug::resource_handle::~resource_handle()
-{
-    if (meta != nullptr)
-    {
-        meta->references--;
-
-        //if resource is automanaged and no one is using it, unload it
-        if (meta->references <= 1 && meta->automanaged && meta->state == resource_state::loaded)
-            smaug_internal::queue_unload(*this);
-
-        if (meta->references == 0)
-            delete meta;
-    }
-}
-
-void smaug::resource_handle::operator=(const resource_handle& other) noexcept
-{
-    if (meta != nullptr)
-        meta->references--;
-
-    meta = other.meta;
-
-    if (meta != nullptr)
-        meta->references++;
-}
-
-bool smaug::resource_handle::operator==(const resource_handle& other) const noexcept
-{
-    return meta == other.meta;
-}
-
-bool smaug::resource_handle::operator!=(const resource_handle& other) const noexcept
-{
-    return meta != other.meta;
-}
-
-template<class resource_subclass>
-const resource_subclass* smaug::static_resource_cast(const resource_handle& handle)
-{
-    auto res = handle.meta->handled_resource;
-    return static_cast<resource_subclass*>(res);
-}
-
-template<class resource_subclass>
-const resource_subclass* smaug::dynamic_resource_cast(const resource_handle& handle)
-{
-    auto res = handle.meta->handled_resource;
-    return dynamic_cast<resource_subclass*>(res);
-}
-
-/*
-    Promises
-*/
-
-smaug::resource_load_promise::resource_load_promise(resource_handle handle) :
-    resource_name(&handle.meta->resource_uid) 
-{};
-
-smaug::resource_unload_promise::resource_unload_promise(resource_handle handle) :
-    resource_name(&handle.meta->resource_uid),
-    resource_to_unload(handle.meta->handled_resource)
-{};
-
-/*
-    Implementation Utilities
-*/
-
-//thread safe create handle
-smaug::resource_handle smaug_internal::safe_create_handle(const std::string& resource_name, bool automanaged)
-{
-    //we're going to modify the registry so we obtain the unique lock
-    resource_registry_mutex.lock();
-
-    //check if other thread hasn't added this handle while we were waiting for lock
-    auto itr = resource_registry.find(resource_name);
-    if (itr != resource_registry.end()) 
-    {
-        auto handle = itr->second;
-        resource_registry_mutex.unlock();
-        return handle;
-    }
-    
-    itr = resource_registry.insert(
-        {
-            resource_name, 
-            smaug::resource_handle{
-                resource_name,
-                nullptr, 
-                (uint8_t)resource_state::unloaded, 
-                automanaged
-            }
-        }
-    ).first;
-
-    {
-        auto handle = itr->second;
-
-        resource_registry_mutex.unlock();
-
-        return handle;
-    }
-}
-
-//thread safe get handle
-//may return invalid (nullptr) handle
-smaug::resource_handle smaug_internal::safe_get_handle(const std::string& resource_name)
-{
-    resource_registry_mutex.lock_shared();
-
-    auto itr = resource_registry.find(resource_name);
-    smaug::resource_handle handle = itr != resource_registry.end() ? itr->second : smaug::empty_handle(); 
-
-    resource_registry_mutex.unlock_shared();
-
-    return handle;
-}
-
-void smaug_internal::queue_load(const smaug::resource_handle& handle)
-{
-    load_queue_mutex.lock();
-
-    load_queue.push(handle);
-    handle.meta->state = resource_state::pending_load;
-
-    load_queue_mutex.unlock();
-}
-
-void smaug_internal::queue_unload(const smaug::resource_handle& handle)
-{
-    load_queue_mutex.lock();
-    
-    unload_queue.push_back(handle);
-    handle.meta->state = resource_state::pending_unload;
-
-    load_queue_mutex.unlock();
-}
-
-/*
-    API implementation
-*/
-
-smaug::resource_handle smaug::register_resource(const std::string& name, resource* resource, bool automanaged)
-{  
-    {
-        std::shared_lock<std::shared_mutex> shared_lock{resource_registry_mutex};
-
-        if (resource_registry.find(name) != resource_registry.end())
-            throw std::runtime_error{"Smaug Error: Resource named \"" + name + "\" had been already registered"};
-    }
-
-    resource_handle handle = smaug_internal::safe_create_handle(name, automanaged);
-
-    handle.meta->handled_resource = resource;
-    handle.meta->state            = resource_state::loaded;
-
-    return handle;
-}
-
-smaug::resource_handle smaug::get_resource(const std::string& name)
-{
-    auto handle = smaug_internal::safe_get_handle(name);
-
-    //if resource havent been found
-    if (!is_handle_valid(handle))
-    {
-        handle = smaug_internal::safe_create_handle(name, true);
-        smaug_internal::queue_load(handle);
-    }
-
-_get_resource_switch:
-    switch (handle.meta->state)
-    {
-    case resource_state::pending_load: 
-    case resource_state::during_load: 
-    case resource_state::loaded: 
-    case resource_state::invalid:
-        break;
-
-    //if it is during unload, then there is another thread that handles unloading, we can simply wait
-    case resource_state::during_unload:
-        while (handle.meta->state == resource_state::during_unload)
-            std::this_thread::yield();
-        goto _get_resource_switch;
-
-    //we need to remove resource from the queue
-    case resource_state::pending_unload:
-        unload_queue_mutex.lock();
-
-        for (auto qitr = unload_queue.begin(); qitr != unload_queue.end(); qitr++)
-            if (*qitr == handle)
-            {
-                unload_queue.erase(qitr);
-                handle.meta->state = resource_state::loaded;
-                break;
-            }
-        
-        unload_queue_mutex.unlock();
-        goto _get_resource_switch;
-
-    case resource_state::unloaded:
-        smaug_internal::queue_load(handle);
-        break;
-    }
-
-    return handle;
-}
-
-bool smaug::is_loading_job_available()
-{
-    return load_queue.size() != 0;
-}
-
-bool smaug::is_unloading_job_available()
-{
-    return unload_queue.size() != 0;
-}
-
-smaug::resource_load_promise* smaug::take_resource_loading_job()
-{
-    resource_load_promise* promise = nullptr;
-    std::lock_guard<std::mutex> guard(load_queue_mutex);
-
-    while (true)
-    {
-        if (load_queue.empty()) return nullptr;
-
-        resource_handle job = load_queue.front();
-        load_queue.pop();
-
-        if (job.meta->state != resource_state::pending_load)
-            continue;
-
-        job.meta->state = resource_state::during_load;
-        promise = new resource_load_promise{job};
-        break;
-    }
-
-    return promise;
-}
-
-smaug::resource_unload_promise* smaug::take_resource_unloading_job()
-{
-    resource_unload_promise* promise = nullptr;
-    std::lock_guard<std::mutex> guard(unload_queue_mutex);
-
-    while (true)
-    {
-        if (unload_queue.empty()) return nullptr;
-
-        resource_handle job = unload_queue.front();
-        unload_queue.erase(unload_queue.begin());
-
-        if (job.meta->state != resource_state::pending_unload)
-            continue;
-
-        job.meta->state = resource_state::during_unload;
-        promise = new resource_unload_promise{job};
-        break;
-    }
-
-    return promise;
-}
-
-void smaug::commit_resource_loading_job(resource_load_promise* promise)
-{
-    //with assumtion the handle for given resource exists and is valid
-    auto handle = smaug_internal::safe_get_handle(*promise->resource_name);
-    
-    if (promise->success)
-    {
-        handle.meta->state = resource_state::loaded;
-        handle.meta->handled_resource = promise->loaded_resource;
-    }
-    else
-    {
-        handle.meta->state = resource_state::invalid;
-        handle.meta->handled_resource = nullptr;
-    }
-}
-
-void smaug::commit_resource_unloading_job(resource_unload_promise* promise)
-{
-    //with assumtion the handle for given resource exists and is valid
-    auto handle = smaug_internal::safe_get_handle(*promise->resource_name);
-    
-    if (promise->success)
-    {
-        handle.meta->state = resource_state::unloaded;
-        handle.meta->handled_resource = nullptr;
-    }
-    else
-    {
-        throw std::runtime_error{"Smaug Error: Resource \"" + *promise->resource_name + "\" could not be unloaded"};
-    }
-}
-
-void smaug::mark_all_resources_for_unload()
-{
-    resource_registry_mutex.lock_shared();
-
-    for (auto& pair : resource_registry)
-    {
-        auto handle = pair.second;
-        if (handle.meta->state == resource_state::loaded && handle.meta->automanaged)
-            smaug_internal::queue_unload(handle);
-    }
-
-    resource_registry_mutex.unlock_shared();
-}
-
-bool smaug::is_handle_valid(const resource_handle& handle)
-{
-    return handle.meta != nullptr && handle.meta->state != resource_state::invalid;
+    return resource_handle(nullptr);
 }
 
 bool smaug::is_resource_ready(const resource_handle& handle)
 {
-    return  handle.meta != nullptr && handle.meta->state == resource_state::loaded;
+    return handle.meta->state == resource_state::loaded;
 }
 
-smaug::resource_handle smaug::empty_handle()
+bool smaug::is_handle_empty(const resource_handle& handle)
 {
-    return smaug::resource_handle{"", nullptr, (uint8_t)resource_state::invalid, false};
+    return handle.meta == nullptr;
+}
+
+const std::string& smaug::get_resource_name(const resource_handle& handle)
+{
+    return *handle.meta->name;
+}
+
+const smaug::resource* smaug::use_resource(const resource_handle& handle)
+{
+    return handle.meta->resource;
+}
+
+bool operator==(const smaug::resource_handle& lhs, const smaug::resource_handle& rhs) noexcept
+{
+    return lhs.meta == rhs.meta;
+}
+
+bool operator!=(const smaug::resource_handle& lhs, const smaug::resource_handle& rhs) noexcept
+{
+    return lhs.meta != rhs.meta;
+}
+
+/*
+    Resources Registry
+*/
+
+#include <mutex>
+#include <unordered_map>
+#include <deque>
+
+std::mutex resources_registry_mutex;
+std::unordered_map<std::string, resource_meta*> resources_registry;
+
+std::mutex pending_load_registry_mutex;
+std::deque<resource_meta*> pending_load_registry;
+
+std::mutex pending_unload_registry_mutex;
+std::deque<resource_meta*> pending_unload_registry;
+
+smaug::resource_handle smaug::get_resource(const std::string& name)
+{
+    std::lock_guard<std::mutex> lock(resources_registry_mutex);
+
+    //Search for meta handle
+    auto itr = resources_registry.find(name);
+
+    //meta handle not found, create one and issue resource load
+    if (itr == resources_registry.end())
+    {
+        resource_meta* meta;
+        meta->resource = nullptr;
+        meta = new resource_meta;
+    
+        meta->state = resource_state::pending_load;
+        meta->handles = 0;
+
+        auto itr = resources_registry.insert({name, std::move(meta)}).first;
+        itr->second->name = &itr->first;   //link resource meta with res name, stored as a map key
+
+        std::lock_guard<std::mutex> lock(pending_load_registry_mutex);
+        pending_load_registry.push_back(itr->second);
+        
+        return smaug::resource_handle(itr->second);
+    }
+
+    //Return proper handle
+    return smaug::resource_handle(itr->second);
+}
+
+bool smaug::resource_load_promise_empty(const resource_load_promise& promise)
+{
+    return promise.meta == nullptr;
+}
+
+smaug::resource_load_promise smaug::take_resource_load_job()
+{
+    //Nothing to load
+    if (!pending_load_registry.size()) goto _return_empty_promise;
+
+    //Loop till found something
+    {
+        std::lock_guard<std::mutex> lock{pending_load_registry_mutex};
+        auto itr = pending_load_registry.begin();
+        while (itr != pending_load_registry.end())
+        {
+            auto meta = *itr;
+            itr = pending_load_registry.erase(itr);
+
+            //Resource might have been abonded and directed to unload since request
+            //Therefore this check
+            if (meta->state == resource_state::pending_load)
+            {
+                smaug::resource_load_promise x;
+                x.meta = meta;
+                return x;
+            }
+        }
+    }
+
+    //Nothing to load
+_return_empty_promise:
+    smaug::resource_load_promise p;
+    p.meta = nullptr;
+    return p;
+}
+
+smaug::resource_handle smaug::submit_resource_load_job(resource_load_promise promise, resource* resource)
+{
+    smaug::resource_handle handle{reinterpret_cast<resource_meta*>(promise.meta)};
+
+    //Mark resource as loaded if resource != nullptr
+    if (resource)
+    {
+        handle.meta->resource = resource;
+        handle.meta->state = resource_state::loaded;
+    }
+    return handle;
+}
+
+smaug::resource* smaug::take_resource_unload_job()
+{
+    //Nothing to unload
+    if (!pending_unload_registry.size()) return nullptr;
+
+    //Loop till found something
+    std::lock_guard<std::mutex> lock{pending_load_registry_mutex};
+    auto itr = pending_unload_registry.begin();
+    while (itr != pending_unload_registry.end())
+    {
+        auto meta = *itr;
+        itr = pending_unload_registry.erase(itr);
+
+        //Resource might have got into use since it was issued to unload
+        //Therefore this check
+        if (meta->state == resource_state::pending_unload)
+        {
+            meta->state = resource_state::unloaded;
+            return meta->resource;
+        }
+    }
+
+    //Nothing to unload
+    return nullptr;
+}
+
+smaug::resource_handle smaug::register_resource(const std::string& name, resource* resource)
+{
+    std::lock_guard<std::mutex> lock(resources_registry_mutex);
+
+    //Search for meta handle
+    auto itr = resources_registry.find(name);
+
+    //meta handle not found, create one
+    if (itr == resources_registry.end())
+    {
+        //Create meta handle
+        resource_meta* meta;
+        
+        meta = new resource_meta;
+        meta->resource = resource;
+
+        meta->handles = 0;
+        meta->state = resource_state::loaded;
+
+        //Push resource
+        auto itr = resources_registry.insert({name, std::move(meta)}).first;
+        itr->second->name = &itr->first;   //link resource meta with res name, stored as a map key
+
+        return smaug::resource_handle(meta);
+    }
+
+    //Handle found, change it's state
+    itr->second->state = resource_state::loaded;
+    itr->second->resource = resource;
+ 
+    return smaug::resource_handle(itr->second);
+}
+
+void move_to_unload(resource_meta* meta)
+{
+    meta->state = resource_state::pending_unload;
+    std::lock_guard<std::mutex> lock(pending_unload_registry_mutex);
+    pending_unload_registry.push_back(meta);
+}
+
+void smaug::move_all_resources_to_unload()
+{
+    std::lock_guard<std::mutex> lock(resources_registry_mutex);
+
+    for (auto& kv : resources_registry)
+        move_to_unload(kv.second);
 }
 
 #endif
