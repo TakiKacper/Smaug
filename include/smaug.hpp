@@ -1,8 +1,5 @@
 #pragma once
-
-#include <cstdint>
 #include <string>
-#include <atomic>
 
 /*
     Forwards
@@ -14,28 +11,36 @@ namespace smaug
     struct resource_handle;
     struct resource_load_promise;
 
-    const std::string&      get_resource_name(const resource_load_promise& promise);
+/*
+    Client Api
+*/
+
+    const std::string&      get_resource_name   (const resource_load_promise& promise);
+    const std::string&      get_resource_name   (const resource_handle& handle);
+
+    resource_handle         get_resource        (const std::string& name);
+
+    template<class resouce_subclass>
+    bool                    check_resource_type (const resource_handle& handle);
+
+    template<class resouce_subclass>
+    const resouce_subclass& use_resource        (const resource_handle& handle);
 
     resource_handle         empty_handle();
-    bool                    is_resource_ready(const resource_handle& handle);
-    bool                    is_handle_empty(const resource_handle& handle);
-    const std::string&      get_resource_name(const resource_handle& handle);
+    bool                    is_resource_ready   (const resource_handle& handle);
+    bool                    is_handle_empty     (const resource_handle& handle);
+    
+/*
+    Resources loading/unloading
+*/
+    
+    resource_handle         register_resource           (const std::string& name, resource* resource);
 
-    resource_handle         get_resource(const std::string& name);
-
-    template<class resouce_subclass>
-    const resouce_subclass& static_resource_cast(const resource_handle& handle);
-
-    template<class resouce_subclass>
-    const resouce_subclass& dynamic_resource_cast(const resource_handle& handle);
-
-    bool                    resource_load_promise_empty(const resource_load_promise& promise);
+    bool                    resource_load_promise_empty (const resource_load_promise& promise);
     resource_load_promise   take_resource_load_job();
-    resource_handle         submit_resource_load_job(resource_load_promise promise, resource* resource);
+    resource_handle         submit_resource_load_job    (resource_load_promise promise, resource* resource);
 
     resource*               take_resource_unload_job();
-
-    resource_handle         register_resource(const std::string& name, resource* resource);
 
     void                    move_all_resources_to_unload();
 }
@@ -51,7 +56,7 @@ public:
 
 struct smaug::resource_load_promise
 {
-friend bool smaug::resource_load_promise_empty(const resource_load_promise& promise);
+friend bool                         smaug::resource_load_promise_empty(const resource_load_promise& promise);
 friend smaug::resource_load_promise smaug::take_resource_load_job();
 friend smaug::resource_handle       smaug::submit_resource_load_job(resource_load_promise promise, resource* resource);
 private:
@@ -66,6 +71,8 @@ private:
 #ifdef SMAUG_IMPLEMENTATION
 
 #include <atomic>
+#include <cstdint>
+#include <string>
 
 /*
     Resources State
@@ -122,47 +129,38 @@ struct smaug::resource_handle
     }
 };
 
-smaug::resource_handle smaug::empty_handle()
-{
+smaug::resource_handle smaug::empty_handle() {
     return resource_handle(nullptr);
 }
 
-bool smaug::is_resource_ready(const resource_handle& handle)
-{
+bool smaug::is_resource_ready(const resource_handle& handle) {
     return handle.meta->state == resource_state::loaded;
 }
 
-bool smaug::is_handle_empty(const resource_handle& handle)
-{
+bool smaug::is_handle_empty(const resource_handle& handle) {
     return handle.meta == nullptr;
 }
 
-const std::string& smaug::get_resource_name(const resource_handle& handle)
-{
+const std::string& smaug::get_resource_name(const resource_handle& handle) {
     return *handle.meta->name;
 }
 
 template<class resouce_subclass>
-const resouce_subclass& smaug::static_resource_cast(const resource_handle& handle)
-{
+bool smaug::check_resource_type(const resource_handle& handle) {
+    return dynamic_cast<resouce_subclass*>(handle.meta->resource) != nullptr;
+}
+
+template<class resouce_subclass>
+const resouce_subclass& smaug::use_resource(const resource_handle& handle) {
     auto ptr = handle.meta->resource;
     return *static_cast<const resouce_subclass*>(ptr);
 }
 
-template<class resouce_subclass>
-const resouce_subclass& smaug::dynamic_resource_cast(const resource_handle& handle)
-{
-    auto ptr = handle.meta->resource;
-    return *dynamic_cast<const resouce_subclass*>(ptr);
-}
-
-bool operator==(const smaug::resource_handle& lhs, const smaug::resource_handle& rhs) noexcept
-{
+bool operator==(const smaug::resource_handle& lhs, const smaug::resource_handle& rhs) noexcept {
     return lhs.meta == rhs.meta;
 }
 
-bool operator!=(const smaug::resource_handle& lhs, const smaug::resource_handle& rhs) noexcept
-{
+bool operator!=(const smaug::resource_handle& lhs, const smaug::resource_handle& rhs) noexcept {
     return lhs.meta != rhs.meta;
 }
 
