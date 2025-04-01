@@ -22,7 +22,12 @@ namespace smaug
     const std::string&      get_resource_name(const resource_handle& handle);
 
     resource_handle         get_resource(const std::string& name);
-    const resource*         use_resource(const resource_handle& handle);
+
+    template<class resouce_subclass>
+    const resouce_subclass& static_resource_cast(const resource_handle& handle);
+
+    template<class resouce_subclass>
+    const resouce_subclass& dynamic_resource_cast(const resource_handle& handle);
 
     bool                    resource_load_promise_empty(const resource_load_promise& promise);
     resource_load_promise   take_resource_load_job();
@@ -137,9 +142,18 @@ const std::string& smaug::get_resource_name(const resource_handle& handle)
     return *handle.meta->name;
 }
 
-const smaug::resource* smaug::use_resource(const resource_handle& handle)
+template<class resouce_subclass>
+const resouce_subclass& smaug::static_resource_cast(const resource_handle& handle)
 {
-    return handle.meta->resource;
+    auto ptr = handle.meta->resource;
+    return *static_cast<const resouce_subclass*>(ptr);
+}
+
+template<class resouce_subclass>
+const resouce_subclass& smaug::dynamic_resource_cast(const resource_handle& handle)
+{
+    auto ptr = handle.meta->resource;
+    return *dynamic_cast<const resouce_subclass*>(ptr);
 }
 
 bool operator==(const smaug::resource_handle& lhs, const smaug::resource_handle& rhs) noexcept
