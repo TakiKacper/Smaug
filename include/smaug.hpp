@@ -36,7 +36,6 @@ namespace smaug
     
     resource_handle         register_resource           (const std::string& name, resource* resource);
 
-    bool                    resource_load_promise_empty (const resource_load_promise& promise);
     resource_load_promise   take_resource_load_job();
     resource_handle         submit_resource_load_job    (resource_load_promise promise, resource* resource);
 
@@ -51,17 +50,25 @@ bool operator!=(const smaug::resource_handle& lhs, const smaug::resource_handle&
 struct smaug::resource
 {
 public:
+    resource() {};
     virtual ~resource() {};
+    resource(const resource&) = delete;
 };
 
 struct smaug::resource_load_promise
 {
-friend bool                         smaug::resource_load_promise_empty(const resource_load_promise& promise);
 friend smaug::resource_load_promise smaug::take_resource_load_job();
 friend smaug::resource_handle       smaug::submit_resource_load_job(resource_load_promise promise, resource* resource);
 private:
     //implicitly resource_meta; not to expose the class to client
     void* meta;
+public:
+    bool operator==(std::nullptr_t other){
+        return meta == other;
+    }
+    bool operator!(){
+        return !meta;
+    }
 };
 
 /*
@@ -209,11 +216,6 @@ smaug::resource_handle smaug::get_resource(const std::string& name)
 
     //Return proper handle
     return smaug::resource_handle(itr->second);
-}
-
-bool smaug::resource_load_promise_empty(const resource_load_promise& promise)
-{
-    return promise.meta == nullptr;
 }
 
 smaug::resource_load_promise smaug::take_resource_load_job()
