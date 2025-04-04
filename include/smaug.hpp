@@ -283,6 +283,8 @@ smaug::resource* smaug::take_resource_unload_job()
         if (meta->state == resource_state::pending_unload)
         {
             meta->state = resource_state::unloaded;
+            meta->resource = nullptr;
+            
             return meta->resource;
         }
     }
