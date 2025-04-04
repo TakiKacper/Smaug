@@ -179,14 +179,16 @@ bool operator!=(const smaug::resource_handle& lhs, const smaug::resource_handle&
 #include <unordered_map>
 #include <deque>
 
-std::mutex resources_registry_mutex;
-std::unordered_map<std::string, resource_meta*> resources_registry;
-
-std::mutex pending_load_registry_mutex;
-std::deque<resource_meta*> pending_load_registry;
-
-std::mutex pending_unload_registry_mutex;
-std::deque<resource_meta*> pending_unload_registry;
+namespace {
+    std::mutex resources_registry_mutex;
+    std::unordered_map<std::string, resource_meta*> resources_registry;
+    
+    std::mutex pending_load_registry_mutex;
+    std::deque<resource_meta*> pending_load_registry;
+    
+    std::mutex pending_unload_registry_mutex;
+    std::deque<resource_meta*> pending_unload_registry;
+}
 
 smaug::resource_handle smaug::get_resource(const std::string& name)
 {
